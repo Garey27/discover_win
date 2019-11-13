@@ -1,0 +1,178 @@
+from idaapi import BADADDR, FF_DATA, FF_DWRD, FF_0OFF, get_struc_size, FF_ASCI, do_unknown_range, DOUNK_DELNAMES, doStruct, get_member_by_name, get_32bit, get_ascii_contents, demangle_name, doDwrd, op_offset
+from idc import *
+from ida_struct import get_struc_id, del_struc, get_struc, add_struc, add_struc_member
+
+from utils import utils
+u = utils()
+
+classes = {}
+vtables = {}
+
+class RTTIStruc:
+    tid = 0
+    struc = 0
+    size = 0
+
+def strip(name):
+    if name.startswith("class ") and name.endswith("`RTTI Type Descriptor'"):
+        return name[6:-23]
+    elif name.startswith("struct ") and name.endswith("`RTTI Type Descriptor'"):
+        return name[7:-23]
+    else:
+        return name
+
+class RTTICompleteObjectLocator(RTTIStruc):
+
+    # Init class statics
+    msid = get_struc_id("RTTICompleteObjectLocator")
+    if msid != BADADDR:
+        del_struc(get_struc(msid))
+    msid = add_struc(0xFFFFFFFF, "RTTICompleteObjectLocator", False)
+    add_struc_member(get_struc(msid), "signature", BADADDR, FF_DATA|FF_DWRD, None, 4)
+    add_struc_member(get_struc(msid), "offset", BADADDR, FF_DATA|FF_DWRD, None, 4)
+    add_struc_member(get_struc(msid), "cdOffset", BADADDR, FF_DATA|FF_DWRD, None, 4)
+    add_struc_member(get_struc(msid), "pTypeDescriptor", BADADDR, FF_DATA|FF_DWRD|FF_0OFF, u.mt_rva(), 4)
+    add_struc_member(get_struc(msid), "pClassDescriptor", BADADDR, FF_DATA|FF_DWRD|FF_0OFF, u.mt_rva(), 4)
+    if u.x64:
+        add_struc_member(get_struc(msid), "pSelf", BADADDR, FF_DATA|FF_DWRD|FF_0OFF, u.mt_rva(), 4)
+    tid = msid
+    struc = get_struc(tid)
+    size = get_struc_size(tid)
+
+    def __init__(self, ea, vtable):
+        do_unknown_range(ea, self.size, DOUNK_DELNAMES)
+        if doStruct(ea, self.size, self.tid):
+            # Get adress of type descriptor from CompleteLocator
+            offset = get_member_by_name(self.struc, "pTypeDescriptor").soff
+            typeDescriptor = get_32bit(ea+offset) + u.x64_imagebase()
+            rtd = RTTITypeDescriptor(typeDescriptor)
+            if rtd.class_name:
+                offset = get_member_by_name(self.struc, "pClassDescriptor").soff
+                classHierarchyDes = get_32bit(ea+offset) + u.x64_imagebase()
+                rchd = RTTIClassHierarchyDescriptor(classHierarchyDes)
+                # filter out None entries
+                rchd.bases = filter(lambda x: x, rchd.bases)
+                className = strip(rtd.class_name)
+                classes[className] = [strip(b) for b in rchd.bases]
+                vtables[className] = vtable
+                MakeNameEx(vtable, "vtable__" + className, SN_NOWARN)
+            else:
+                # if the RTTITypeDescriptor doesn't have a valid name for us to
+                # read, then this wasn't a valid RTTICompleteObjectLocator
+                MakeUnknown(ea, self.size, DOUNK_SIMPLE)
+
+class RTTITypeDescriptor(RTTIStruc):
+    class_name = None
+
+    msid = get_struc_id("RTTITypeDescriptor")
+    if msid != BADADDR:
+        del_struc(get_struc(msid))
+    msid = add_struc(0xFFFFFFFF, "RTTITypeDescriptor", False)
+    add_struc_member(get_struc(msid), "pVFTable", BADADDR, FF_DATA|u.PTR_TYPE|FF_0OFF, u.mt_address(), u.PTR_SIZE)
+    add_struc_member(get_struc(msid), "spare", BADADDR, FF_DATA|u.PTR_TYPE, None, u.PTR_SIZE)
+    add_struc_member(get_struc(msid), "name", BADADDR, FF_DATA|FF_ASCI, u.mt_ascii(), 0)
+    tid = msid
+    struc = get_struc(tid)
+    size = get_struc_size(tid)
+
+    def __init__(self, ea):
+        name = ea + get_member_by_name(get_struc(self.tid), "name").soff
+        strlen = u.get_strlen(name)
+        if strlen is None:
+            # not a real vtable
+            return
+        self.size = self.size + strlen
+        mangled = get_ascii_contents(name, strlen, 0)
+        if mangled is None:
+            # not a real function name
+            return
+        demangled = demangle_name('??_R0' + mangled[1:] , 0)
+        if demangled:
+            do_unknown_range(ea, self.size, DOUNK_DELNAMES)
+            if doStruct(ea, self.size, self.tid):
+                self.class_name = demangled
+                return
+        return
+
+class RTTIClassHierarchyDescriptor(RTTIStruc):
+    bases = None
+
+    msid = get_struc_id("RTTIClassHierarchyDescriptor")
+    if msid != BADADDR:
+        del_struc(get_struc(msid))
+    msid = add_struc(0xFFFFFFFF, "RTTIClassHierarchyDescriptor", False)
+    add_struc_member(get_struc(msid), "signature", BADADDR, FF_DWRD|FF_DATA, None, 4)
+    add_struc_member(get_struc(msid), "attribute", BADADDR, FF_DWRD|FF_DATA, None, 4)
+    add_struc_member(get_struc(msid), "numBaseClasses", BADADDR, FF_DWRD|FF_DATA, None, 4)
+    add_struc_member(get_struc(msid), "pBaseClassArray", BADADDR, FF_DATA|FF_DWRD|FF_0OFF, u.mt_rva(), 4)
+    tid = msid
+    struc = get_struc(tid)
+
+    def __init__(self, ea):
+        do_unknown_range(ea, get_struc_size(self.tid), DOUNK_DELNAMES)
+        if doStruct(ea, get_struc_size(self.tid), self.tid):
+            baseClasses = get_32bit(ea+get_member_by_name(get_struc(self.tid), "pBaseClassArray").soff) + u.x64_imagebase()
+            nb_classes = get_32bit(ea+get_member_by_name(get_struc(self.tid), "numBaseClasses").soff)
+            # Skip the first base class as it is itself (could check)
+            self.bases = []
+            for i in range(1, nb_classes):
+                baseClass = get_32bit(baseClasses+i*4) + u.x64_imagebase()
+                doDwrd(baseClasses+i*4, 4)
+                op_offset(baseClasses+i*4, -1, u.REF_OFF|REFINFO_RVA, -1, 0, 0)
+                doStruct(baseClass, RTTIBaseClassDescriptor.size, RTTIBaseClassDescriptor.tid)
+                typeDescriptor = get_32bit(baseClass) + u.x64_imagebase()
+                self.bases.append(RTTITypeDescriptor(typeDescriptor).class_name)
+
+class RTTIBaseClassDescriptor(RTTIStruc):
+    msid = get_struc_id("RTTIBaseClassDescriptor")
+    if msid != BADADDR:
+        del_struc(get_struc(msid))
+    msid = add_struc(0xFFFFFFFF, "RTTIBaseClassDescriptor", False)
+    add_struc_member(get_struc(msid), "pTypeDescriptor", BADADDR, FF_DATA|FF_DWRD|FF_0OFF, u.mt_rva(), 4)
+    add_struc_member(get_struc(msid), "numContainerBases", BADADDR, FF_DWRD|FF_DATA, None, 4)
+    add_struc_member(get_struc(msid), "PMD", BADADDR, FF_DATA|FF_DWRD|FF_0OFF, u.mt_rva(), 4)
+    add_struc_member(get_struc(msid), "attributes", BADADDR, FF_DWRD|FF_DATA, None, 4)
+    tid = msid
+    struc = get_struc(tid)
+    size = get_struc_size(tid)
+
+def findMethods(addr):
+    func = 0
+    methodsCount = 0
+    functions = []
+    while (1):
+        func = u.get_ptr(addr)
+        if (func != 0):
+            seg = ida_segment.getseg(func)
+            if (not seg) or (seg.perm & ida_segment.SEGPERM_EXEC) == 0:
+                break
+
+        functions.append(func)
+        methodsCount += 1
+        addr += u.PTR_SIZE
+
+    # Now lets remove ending zeroes.
+    while (methodsCount):
+        addr -= u.PTR_SIZE
+        func = u.get_ptr(addr)
+        if (func != 0):
+            break
+        methodsCount -= 1
+
+    return functions
+
+def run_msvc():
+    start = u.rdata.startEA
+    end = u.rdata.endEA
+    rdata_size = end-start
+    for offset in xrange(0, rdata_size-u.PTR_SIZE, u.PTR_SIZE):
+        vtable = start+offset
+        if u.isVtable(vtable):
+            col = u.get_ptr(vtable-u.PTR_SIZE)
+            if u.within(col, u.valid_ranges):
+                rcol = RTTICompleteObjectLocator(col, vtable)
+    u.add_missing_classes(classes)
+    for key in classes:
+        if key in vtables.keys():
+            classes[key] = findMethods(vtables[key])
+    return classes, vtables

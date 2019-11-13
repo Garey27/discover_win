@@ -21,6 +21,7 @@ def main():
     database = Database()
     print 'Strings:', len(database.strings)
     print 'Functions:', len(database.functions)
+    print 'RTTI Classes:', len(database.classes)
     database.save(file_path)
 
 

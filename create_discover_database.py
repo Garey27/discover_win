@@ -4,14 +4,13 @@
 # Python
 import cPickle as pickle
 
-
 # =============================================================================
 # >> FUNCTIONS
 # =============================================================================
 class Search(object):
     """A class that implements various search mechanisms."""
 
-    def __init__(self, linux_db, windows_db):
+    def __init__(self, linux_db, windows_db, rtti_search):
         """Initialize the object.
 
         :param Database linux_db: Linux database.
@@ -19,6 +18,7 @@ class Search(object):
         """
         self.linux_db = linux_db
         self.windows_db = windows_db
+        self.rtti_search = rtti_search
 
     def discover(self):
         """Discover Windows functions.
@@ -30,6 +30,9 @@ class Search(object):
             raise ValueError('Windows database has no function.')
 
         total_count = 0
+        if(self.rtti_search):
+            total_count += self._rtti_match_search()
+
         while True:
             count = self._string_match_search()
             if count == 0:
@@ -43,6 +46,45 @@ class Search(object):
         for func in self.windows_db.functions.itervalues():
             if func.renamed:
                 yield (func.ea, func.symbol)
+
+    def _rtti_match_search(self):
+        """Discover functions by searching for RTTI matches.
+
+        :return: Number of discovered functions.
+        :rtype: int
+        """
+        print 'RTTI match search...'
+        count = 0
+        for vt, linux_vtable in self.linux_db.classes.iteritems():
+            for vt2, windows_vtable in self.windows_db.classes.iteritems():
+                if (vt != vt2):
+                    continue
+
+                if(self.rtti_search != 2):
+                    if(len(windows_vtable) != len(linux_vtable)):
+                        continue
+
+                for i, _ in enumerate(linux_vtable[0:-1]):
+                    if(i >= len(linux_vtable) or i >= len(windows_vtable)):
+                        break
+                    found = False
+                    for linux_func in self.linux_db.functions.itervalues():
+                        if (found == True):
+                            break
+                        if (linux_func.demangled_name != linux_vtable[i]):
+                            continue
+                        for windows_func in self.windows_db.functions.itervalues():
+                            if (windows_func.ea == windows_vtable[i]):
+                                if windows_func.renamed:
+                                    found = True
+                                    break
+                                windows_func.rename(linux_func)
+                                count += 1 + self._single_xref_search(linux_func, windows_func)
+                                found = True
+                                break
+
+        print 'Found {0} functions.'.format(count)
+        return count
 
     def _string_match_search(self):
         """Discover functions by searching for strings matches.
@@ -89,7 +131,6 @@ class Search(object):
         :return: Number of discovered functions.
         :rtype: int
         """
-        # TODO: Here is something wrong. It doesn't find a single function...
         print 'Multiple xrefs search...'
         count = 0
 
@@ -104,7 +145,7 @@ class Search(object):
             possible_functions = self.linux_db.get_function_by_symbol(
                 usable_xrefs_to.pop(0).symbol).xrefs_from
             for win_xref_to in self._get_usable_xrefs_to(windows_func):
-                possible_functions.itersection_update(
+                possible_functions.intersection_update(
                     self.linux_db.get_function_by_symbol(
                         win_xref_to.symbol).xrefs_from)
 
@@ -204,6 +245,14 @@ class Search(object):
 # =============================================================================
 def main():
     """Discover Windows functions based on the cleaned database."""
+    rtti_search = 0
+    ask_user = AskYN(0, "Enable RTTI vtable functions rename?")
+    if ask_user:
+        rtti_search = 1
+    if rtti_search:
+        ask_user = AskYN(0, "Rename vtable functions with mismatching sizes?")
+        if ask_user:
+            rtti_search = 2
     cleaned_up_path = AskFile(0, '*.db', 'Select the cleaned up database')
     if cleaned_up_path is None:
         return
@@ -219,7 +268,7 @@ def main():
     if discovered_path is None:
         return
 
-    result = tuple(Search(linux_db, windows_db).discover())
+    result = tuple(Search(linux_db, windows_db, rtti_search).discover())
     print 'Saving discovered database...'
     with open(discovered_path, 'wb') as f:
         pickle.dump(result, f)

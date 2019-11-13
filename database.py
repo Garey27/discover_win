@@ -5,6 +5,7 @@
 import cPickle as pickle
 
 # IDA
+
 try:
     import idaapi
 
@@ -14,10 +15,12 @@ try:
     from idautils import FuncItems
     from idautils import XrefsFrom
 
+    from ida_funcs import get_func
+
     from idc import GetFunctionName
     from idc import GetFunctionAttr
     from idc import GetFuncOffset
-    from idc import FUNCATTR_START
+    from idc import FUNCATTR_START, SEARCH_CASE, SEARCH_DOWN, BADADDR
 
     CALL_JUMP_FLAGS = (
         idaapi.fl_CF,
@@ -25,6 +28,11 @@ try:
         idaapi.fl_JF,
         idaapi.fl_JN,
     )
+
+    from gcc import run_gcc
+    from msvc import run_msvc
+    from ida_typeinf import default_compiler, get_comp, COMP_MS, COMP_GNU
+    from idc_bc695 import FindText
 except ImportError:
     print 'Script has been called outside of IDA.'
 
@@ -42,8 +50,11 @@ class Database(object):
 
         # {<string ea>: <str or None>, ...}
         self.strings = {}
+        self.classes = {}
+        self.vtables = {}
 
         print 'Creating database...'
+        self._fill_classes()
         self._fill_strings()
         self._fill_functions()
         self._add_function_strings()
@@ -59,12 +70,19 @@ class Database(object):
                 # I forgot when this can happen...
                 continue
 
+    def _fill_classes(self):
+        compiler = get_comp(default_compiler())
+        if compiler == COMP_GNU:
+            self.classes = run_gcc()
+        elif compiler == COMP_MS:
+            self.classes, self.vtables = run_msvc()
+
     def _fill_functions(self):
         """Fill the ``functions`` dict."""
         functions = self.functions
         for ea in Functions():
-            if GetFunctionName(ea).startswith('_ZThn'):
-                continue
+            #if GetFunctionName(ea).startswith('_ZThn'):
+            #   continue
 
             functions[ea] = Function(self, ea)
 
@@ -266,8 +284,12 @@ class Function(object):
 
             if GetFunctionName(xref.to).startswith('_ZThn'):
                 continue
-
-            yield xref.to
+            #Seems like old _get_xref_to_calls was returned ea, so instead better return xref.frm function?
+            func = get_func(xref.frm)
+            if (func is None):
+                yield xref.to
+            else:
+                yield func.startEA
 
     def _get_xref_from_calls(self, ea):
         """Return a generator to iterate over all function address that are
